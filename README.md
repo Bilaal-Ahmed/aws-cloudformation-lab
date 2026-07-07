@@ -1,4 +1,4 @@
-# ☁️ aws-cloudformation-lab
+# ☁️ AWS-Cloud-Formation-Lab
 
 > **A hands-on learning laboratory for AWS CloudFormation and Infrastructure as Code (IaC)**
 > Built for Junior DevOps Engineers looking to build a production-ready portfolio.
