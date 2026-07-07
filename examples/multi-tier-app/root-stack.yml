@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ==============================================================================
+# Example: Multi-Tier Application Stack
+#
+# Description: Demonstrates how a root CloudFormation template would
+#              orchestrate multiple nested stacks (networking, compute, data).
+#              This is a REFERENCE PATTERN — not deployable as-is.
+#              Expand each nested stack template as you learn.
+#
+# Pattern: Root Stack → Nested Stacks
+# ==============================================================================
+
+Description: >
+  Reference architecture for a multi-tier application using CloudFormation
+  nested stacks. Demonstrates best practices for modular IaC design.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  TemplatesBucketName:
+    Type: String
+    Description: "S3 bucket where nested stack templates are uploaded."
+
+# Mappings allow you to select values based on input parameters.
+# Example: different CIDR ranges per environment.
+Mappings:
+  EnvironmentConfig:
+    dev:
+      VpcCidr: "10.0.0.0/16"
+      InstanceType: "t3.micro"
+    staging:
+      VpcCidr: "10.1.0.0/16"
+      InstanceType: "t3.small"
+    prod:
+      VpcCidr: "10.2.0.0/16"
+      InstanceType: "t3.medium"
+
+Resources:
+
+  # ── Layer 1: Networking ────────────────────────────────────────────────────
+  # Nested stack for VPC, subnets, IGW, NAT Gateway, Route Tables
+  NetworkingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "https://s3.amazonaws.com/${TemplatesBucketName}/networking.yml"
+      Parameters:
+        Environment: !Ref Environment
+        VpcCidr: !FindInMap [EnvironmentConfig, !Ref Environment, VpcCidr]
+      Tags:
+        - Key: Layer
+          Value: Networking
+
+  # ── Layer 2: Security ──────────────────────────────────────────────────────
+  # Nested stack for Security Groups, IAM Roles, KMS Keys
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkingStack
+    Properties:
+      TemplateURL: !Sub "https://s3.amazonaws.com/${TemplatesBucketName}/security.yml"
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkingStack.Outputs.VpcId  # Cross-stack reference via Outputs
+      Tags:
+        - Key: Layer
+          Value: Security
+
+  # ── Layer 3: Data ──────────────────────────────────────────────────────────
+  # Nested stack for S3, RDS, ElastiCache
+  DataStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: SecurityStack
+    Properties:
+      TemplateURL: !Sub "https://s3.amazonaws.com/${TemplatesBucketName}/data.yml"
+      Parameters:
+        Environment: !Ref Environment
+        DatabaseSg: !GetAtt SecurityStack.Outputs.DatabaseSecurityGroupId
+        PrivateSubnets: !GetAtt NetworkingStack.Outputs.PrivateSubnetIds
+      Tags:
+        - Key: Layer
+          Value: Data
+
+  # ── Layer 4: Compute ───────────────────────────────────────────────────────
+  # Nested stack for EC2, ASG, ALB
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: DataStack
+    Properties:
+      TemplateURL: !Sub "https://s3.amazonaws.com/${TemplatesBucketName}/compute.yml"
+      Parameters:
+        Environment: !Ref Environment
+        InstanceType: !FindInMap [EnvironmentConfig, !Ref Environment, InstanceType]
+        PublicSubnets: !GetAtt NetworkingStack.Outputs.PublicSubnetIds
+        AppSg: !GetAtt SecurityStack.Outputs.AppSecurityGroupId
+      Tags:
+        - Key: Layer
+          Value: Compute
+
+Outputs:
+  NetworkingStackRef:
+    Value: !Ref NetworkingStack
+    Description: "Reference to the Networking nested stack"
+
+  ComputeStackRef:
+    Value: !Ref ComputeStack
+    Description: "Reference to the Compute nested stack"

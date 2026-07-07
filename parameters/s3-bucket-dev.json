@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "BucketName",
+    "ParameterValue": "my-cfn-lab-bucket-dev-001"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "EnableVersioning",
+    "ParameterValue": "Enabled"
+  },
+  {
+    "ParameterKey": "TransitionToIADays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "ExpirationDays",
+    "ParameterValue": "365"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "aws-cloudformation-lab"
+  },
+  {
+    "ParameterKey": "OwnerEmail",
+    "ParameterValue": "devops@example.com"
+  }
+]

@@ -1,0 +1,405 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ==============================================================================
+# Template:    s3-bucket.yml
+# Description: Provisions a secure, production-ready Amazon S3 bucket with:
+#              - Server-side encryption (SSE-S3 / AES-256)
+#              - Versioning enabled for data protection
+#              - Lifecycle rules to transition and expire objects
+#              - Public access block (all public access denied)
+#              - Access logging to a dedicated logging bucket
+#              - Configurable via CloudFormation Parameters
+#
+# Author:      aws-cloudformation-lab
+# Created:     2026-07-07
+# Usage:
+#   aws cloudformation create-stack \
+#     --stack-name my-s3-lab-stack \
+#     --template-body file://templates/s3-bucket.yml \
+#     --parameters file://parameters/s3-bucket-dev.json
+# ==============================================================================
+
+Description: >
+  Secure, production-ready S3 Bucket with versioning, server-side encryption,
+  lifecycle policies, and public access block. Part of the aws-cloudformation-lab
+  learning series.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# METADATA: Defines how parameters are grouped in the AWS Console
+# ──────────────────────────────────────────────────────────────────────────────
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "🪣 Bucket Configuration"
+        Parameters:
+          - BucketName
+          - Environment
+      - Label:
+          default: "🔐 Security & Versioning"
+        Parameters:
+          - EnableVersioning
+          - EnableEncryption
+      - Label:
+          default: "📦 Lifecycle Management"
+        Parameters:
+          - TransitionToIADays
+          - ExpirationDays
+      - Label:
+          default: "🏷️ Tagging"
+        Parameters:
+          - ProjectName
+          - OwnerEmail
+    ParameterLabels:
+      BucketName:
+        default: "S3 Bucket Name (must be globally unique)"
+      Environment:
+        default: "Deployment Environment"
+      EnableVersioning:
+        default: "Enable Object Versioning?"
+      EnableEncryption:
+        default: "Enable Server-Side Encryption?"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PARAMETERS: Input values passed at stack creation or update
+# ──────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  # Bucket name — must be globally unique across all AWS accounts
+  BucketName:
+    Type: String
+    Description: >
+      Globally unique name for the S3 bucket. Must be lowercase, 3-63 characters,
+      and can contain letters, numbers, and hyphens.
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "^[a-z0-9][a-z0-9\\-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Bucket name must be lowercase, start and end with a letter or number,
+      and contain only letters, numbers, and hyphens.
+
+  # Environment tag used for resource tagging and conditional logic
+  Environment:
+    Type: String
+    Description: "Deployment environment for tagging and configuration."
+    Default: "dev"
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    ConstraintDescription: "Must be one of: dev, staging, prod."
+
+  # Toggle versioning on or off
+  EnableVersioning:
+    Type: String
+    Description: "Enable S3 object versioning to protect against accidental deletion."
+    Default: "Enabled"
+    AllowedValues:
+      - Enabled
+      - Suspended
+
+  # Number of days before transitioning objects to S3 Standard-IA (infrequent access)
+  TransitionToIADays:
+    Type: Number
+    Description: >
+      Days after object creation to transition to S3 Standard-IA storage class.
+      Use 0 to disable transition.
+    Default: 90
+    MinValue: 0
+    MaxValue: 3650
+
+  # Number of days before non-current (older) object versions expire
+  ExpirationDays:
+    Type: Number
+    Description: >
+      Days after which non-current (versioned) objects are permanently deleted.
+      Use 0 to disable expiration.
+    Default: 365
+    MinValue: 0
+    MaxValue: 3650
+
+  # Project name for tagging
+  ProjectName:
+    Type: String
+    Description: "Project name used for resource tagging."
+    Default: "aws-cloudformation-lab"
+
+  # Owner contact for tagging / cost allocation
+  OwnerEmail:
+    Type: String
+    Description: "Email of the team/individual responsible for this resource."
+    Default: "devops@example.com"
+    AllowedPattern: "^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$"
+    ConstraintDescription: "Must be a valid email address."
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONDITIONS: Conditional resource creation based on parameter values
+# ──────────────────────────────────────────────────────────────────────────────
+Conditions:
+
+  # Only create lifecycle transition rule if TransitionToIADays > 0
+  HasTransitionRule: !Not [!Equals [!Ref TransitionToIADays, 0]]
+
+  # Only create expiration rule if ExpirationDays > 0
+  HasExpirationRule: !Not [!Equals [!Ref ExpirationDays, 0]]
+
+  # True when deploying to production — useful for stricter controls
+  IsProduction: !Equals [!Ref Environment, "prod"]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RESOURCES: AWS resources to be provisioned by this template
+# ──────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # S3 Bucket for Access Logs
+  # Best Practice: Store access logs in a SEPARATE, dedicated bucket.
+  # This bucket is created first so the main bucket can reference it.
+  # ────────────────────────────────────────────────────────────────────────────
+  S3AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain keeps the bucket even if the stack is deleted.
+    # Change to Delete for lab/dev environments where you want full cleanup.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Logging bucket name is derived from the main bucket name
+      BucketName: !Sub "${BucketName}-access-logs"
+
+      # Block ALL public access — mandatory for a logs bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+      # Enable versioning on the logs bucket too
+      VersioningConfiguration:
+        Status: Enabled
+
+      # Encrypt the logs at rest using SSE-S3 (AES-256)
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+
+      # Lifecycle: expire log objects after 90 days to control storage costs
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+
+      Tags:
+        - Key: Name
+          Value: !Sub "${BucketName}-access-logs"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: "S3AccessLogs"
+        - Key: ManagedBy
+          Value: "CloudFormation"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Bucket Policy for Access Logs Bucket
+  # Required to allow S3 Log Delivery service to write access logs
+  # ────────────────────────────────────────────────────────────────────────────
+  S3AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3AccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Allow S3 Log Delivery group to write access logs
+          - Sid: AllowS3LogDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${BucketName}-access-logs/logs/*"
+            Condition:
+              # Restrict to logs originating from the main bucket (source)
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:s3:::${BucketName}"
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+          # Deny any HTTP (non-HTTPS) requests — enforce encryption in transit
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${BucketName}-access-logs"
+              - !Sub "arn:aws:s3:::${BucketName}-access-logs/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Main S3 Bucket
+  # This is the primary bucket for storing application/lab data.
+  # ────────────────────────────────────────────────────────────────────────────
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    # DependsOn ensures the logs bucket and its policy are ready first
+    DependsOn: S3AccessLogsBucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Use the BucketName parameter provided at deployment time
+      BucketName: !Ref BucketName
+
+      # ── Versioning ──────────────────────────────────────────────────────────
+      # Versioning keeps multiple variants of an object in the same bucket.
+      # Protects against accidental deletes and overwrites.
+      VersioningConfiguration:
+        Status: !Ref EnableVersioning
+
+      # ── Server-Side Encryption ──────────────────────────────────────────────
+      # All objects stored in the bucket are automatically encrypted at rest.
+      # AES-256 (SSE-S3) is managed by AWS — no key management overhead.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            # BucketKeyEnabled reduces API call costs for SSE-KMS (kept for KMS upgrade path)
+            BucketKeyEnabled: true
+
+      # ── Public Access Block ─────────────────────────────────────────────────
+      # This is the most important security control on an S3 bucket.
+      # Setting all four to true prevents ANY public access, regardless of
+      # bucket policies or object ACLs. NEVER disable this for sensitive data.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true         # Ignore public ACLs on this bucket and objects
+        BlockPublicPolicy: true       # Reject bucket policies that grant public access
+        IgnorePublicAcls: true        # Ignore public ACLs set on objects
+        RestrictPublicBuckets: true   # Restrict cross-account access from public buckets
+
+      # ── Access Logging ──────────────────────────────────────────────────────
+      # Logs all requests made to this bucket to the dedicated logging bucket.
+      # Essential for security auditing and compliance.
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: "logs/"
+
+      # ── Lifecycle Rules ─────────────────────────────────────────────────────
+      # Lifecycle rules automate object transitions and expiration.
+      # This reduces storage costs by moving old data to cheaper storage classes.
+      LifecycleConfiguration:
+        Rules:
+          # Rule 1: Transition current objects to cheaper storage after N days
+          - Id: TransitionToStandardIA
+            Status: !If [HasTransitionRule, Enabled, Disabled]
+            # Transition current-version objects to Standard-IA after N days
+            Transitions:
+              - !If
+                - HasTransitionRule
+                - TransitionInDays: !Ref TransitionToIADays
+                  StorageClass: STANDARD_IA
+                - !Ref AWS::NoValue
+
+          # Rule 2: Expire non-current (versioned) objects after N days
+          - Id: ExpireNoncurrentVersions
+            Status: !If [HasExpirationRule, Enabled, Disabled]
+            # Delete old (non-current) versions after N days to save costs
+            NoncurrentVersionExpirationInDays: !If
+              - HasExpirationRule
+              - !Ref ExpirationDays
+              - !Ref AWS::NoValue
+
+          # Rule 3: Clean up incomplete multipart uploads after 7 days
+          # Incomplete multipart uploads consume storage but aren't visible — this cleans them up
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+      # ── Resource Tags ────────────────────────────────────────────────────────
+      # Tags are critical for cost tracking, governance, and automation.
+      # These follow the AWS Well-Architected tagging best practices.
+      Tags:
+        - Key: Name
+          Value: !Ref BucketName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Owner
+          Value: !Ref OwnerEmail
+        - Key: ManagedBy
+          Value: "CloudFormation"
+        - Key: CostCenter
+          Value: !Sub "infra-${Environment}"
+        - Key: CreatedDate
+          Value: "2026-07-07"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Bucket Policy for Main S3 Bucket
+  # Enforces HTTPS-only access (denies HTTP) — a security best practice
+  # ────────────────────────────────────────────────────────────────────────────
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Deny any access over plain HTTP — enforce TLS/HTTPS at all times
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt S3Bucket.Arn
+              - !Sub "${S3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                # This condition is true when the request is NOT using HTTPS
+                "aws:SecureTransport": false
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OUTPUTS: Values exported from this stack for reference or cross-stack use
+# ──────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  # The globally unique bucket name
+  BucketName:
+    Description: "Name of the provisioned S3 bucket."
+    Value: !Ref S3Bucket
+    Export:
+      # Export the name so other stacks can import it using Fn::ImportValue
+      Name: !Sub "${AWS::StackName}-BucketName"
+
+  # The full ARN of the bucket (useful for IAM policies)
+  BucketArn:
+    Description: "ARN of the provisioned S3 bucket."
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketArn"
+
+  # The HTTPS URL to the bucket (regional domain)
+  BucketDomainName:
+    Description: "Regional domain name of the S3 bucket."
+    Value: !GetAtt S3Bucket.RegionalDomainName
+
+  # ARN of the access logs bucket
+  AccessLogsBucketArn:
+    Description: "ARN of the S3 access logs bucket."
+    Value: !GetAtt S3AccessLogsBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AccessLogsBucketArn"
+
+  # Stack metadata for reference
+  StackRegion:
+    Description: "AWS Region where this stack is deployed."
+    Value: !Ref AWS::Region
+
+  StackAccountId:
+    Description: "AWS Account ID where this stack is deployed."
+    Value: !Ref AWS::AccountId
